@@ -4,7 +4,6 @@ A from-scratch backtesting engine for evaluating systematic trading strategies,
 built to avoid the common correctness pitfalls (lookahead bias, ignoring
 transaction costs) that make naive backtests misleadingly optimistic.
 
-this is a test
 
 ## What it does
 
