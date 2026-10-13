@@ -5,12 +5,13 @@ Sources:
   load_yahoo()          real daily OHLCV via yfinance (split/dividend adjusted),
                         cached to disk so repeated runs are fast and reproducible
   load_csv()            any local OHLCV CSV with a date column
-  generate_synthetic()  simulated prices. With ar_coef=0 this is a pure random
+  generate_synthetic()  simulated prices. With trend=0 this is a pure random
                         walk (GBM): nothing is predictable, so any "edge" a
                         strategy shows on it is noise by construction — the
-                        null hypothesis made concrete. With ar_coef > 0, returns
-                        are autocorrelated: a planted edge that a trend
-                        strategy SHOULD find (a positive control).
+                        null hypothesis made concrete. With trend > 0, a slowly
+                        wandering hidden drift is mixed in: a planted edge that
+                        trend-following strategies SHOULD find and mean
+                        reversion should lose to (a positive control).
 """
 
 from pathlib import Path
@@ -82,35 +83,37 @@ def generate_synthetic(
     s0: float = 100.0,
     mu: float = 0.08,
     sigma: float = 0.20,
-    ar_coef: float = 0.0,
+    trend: float = 0.0,
+    trend_halflife: int = 60,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
     Simulated daily OHLCV.
 
-    Close-to-close log returns follow an AR(1) process
-        r_t = m + ar_coef * (r_{t-1} - m) + e_t
-    with the noise scaled so the unconditional annual drift and volatility
-    are still `mu` and `sigma`. ar_coef=0 gives standard GBM.
+    Daily log returns = constant drift + hidden trend + noise, where the
+    hidden trend is a persistent AR(1) process (half-life `trend_halflife`
+    days). `trend` sets its standard deviation as a fraction of daily
+    volatility; noise is scaled down so total volatility stays ~`sigma`.
+    trend=0 gives standard GBM. Even trend=0.1 is a strong, tradeable edge.
 
     Each day's return is split into an overnight gap (Close_{t-1} -> Open_t)
     and an intraday move (Open_t -> Close_t), so execution timing matters:
     a strategy that can only trade at the next open misses the gap.
     """
-    if not -1 < ar_coef < 1:
-        raise ValueError("ar_coef must be in (-1, 1)")
+    if not 0 <= trend < 1:
+        raise ValueError("trend must be in [0, 1)")
 
     rng = np.random.default_rng(seed)
-    dt = 1 / 252
-    m = (mu - 0.5 * sigma**2) * dt
-    sd = sigma * np.sqrt(dt)
+    sd = sigma / np.sqrt(252)
+    phi = 0.5 ** (1 / trend_halflife)
 
-    eps = rng.standard_normal(days) * sd * np.sqrt(1 - ar_coef**2)
-    log_ret = np.empty(days)
-    prev = m
-    for t in range(days):
-        prev = m + ar_coef * (prev - m) + eps[t]
-        log_ret[t] = prev
+    shocks = rng.standard_normal(days) * trend * sd * np.sqrt(1 - phi**2)
+    hidden = np.zeros(days)
+    for t in range(1, days):
+        hidden[t] = phi * hidden[t - 1] + shocks[t]
+
+    noise = rng.standard_normal(days) * sd * np.sqrt(1 - trend**2)
+    log_ret = (mu - 0.5 * sigma**2) / 252 + hidden + noise
 
     close = s0 * np.exp(np.cumsum(log_ret))
     prev_close = np.concatenate([[s0], close[:-1]])
@@ -155,6 +158,6 @@ def load_price_data(
         return load_yahoo(ticker, start, end), f"{ticker} {start} to {end}"
 
     df = generate_synthetic(**synthetic_kwargs)
-    ar = synthetic_kwargs.get("ar_coef", 0.0)
-    kind = "random walk (no edge exists)" if ar == 0 else f"AR(1) coef={ar} (planted edge)"
+    trend = synthetic_kwargs.get("trend", 0.0)
+    kind = "random walk (no edge exists)" if trend == 0 else f"hidden trend {trend} (planted edge)"
     return df, f"synthetic {kind}, {len(df)} days"

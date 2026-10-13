@@ -67,7 +67,8 @@ class BacktestResult:
         s = slice(start, end)
         returns = self.returns.loc[s]
         t = self.trades
-        trades = t[(t["entry"] >= returns.index[0]) & (t["entry"] <= returns.index[-1])] if len(t) else t
+        # keep every trade that overlaps the window
+        trades = t[(t["exit"] >= returns.index[0]) & (t["entry"] <= returns.index[-1])] if len(t) else t
         return BacktestResult(
             self.name, returns, self.gross_returns.loc[s], self.positions.loc[s],
             self.costs.loc[s], trades, self.initial_capital, dict(self.meta),
