@@ -1,0 +1,10 @@
+[project]
+name = "backtester"
+version = "0.2.0"
+description = "Daily-bar backtester with realistic fills and costs, lookahead audits, and significance tests"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::FutureWarning"]
