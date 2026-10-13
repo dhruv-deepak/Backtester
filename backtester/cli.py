@@ -190,7 +190,7 @@ def cmd_optimize(args) -> None:
     section(f"WALK-FORWARD ({mode} {args.train_days}d train / {args.test_days}d test, out-of-sample only)", body)
     plot_walk_forward(wf.oos, bench, wf.folds, out / f"walkforward_{args.strategy}.png",
                       f"{strat.name}: walk-forward out-of-sample equity")
-    print(f"Charts saved to {out}/heatmap_{args.strategy}.png and {out}/walkforward_{args.strategy}.png")
+    print(f"Charts saved to {out / f'heatmap_{args.strategy}.png'} and {out / f'walkforward_{args.strategy}.png'}")
 
 
 def main(argv=None) -> None:

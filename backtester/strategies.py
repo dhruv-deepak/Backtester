@@ -122,6 +122,7 @@ def volatility_target(
     target_vol: float = 0.15,
     span: int = 30,
     max_leverage: float = 2.0,
+    rebalance_band: float = 0.25,
 ) -> pd.Series:
     """
     Scale positions so the strategy runs at roughly `target_vol` annualised
@@ -131,11 +132,23 @@ def volatility_target(
 
     Why it matters: volatility clusters. Cutting size when vol spikes is one
     of the few robust ways to improve risk-adjusted returns and drawdowns.
+
+    `rebalance_band`: only resize when the target differs from the current
+    position by more than this fraction of it. Without a band, the position
+    is nudged every single day and the trading costs eat much of the benefit.
     """
     returns = df["Close"].pct_change()
     forecast_vol = returns.ewm(span=span, min_periods=span).std() * np.sqrt(TRADING_DAYS)
     scale = (target_vol / forecast_vol).clip(upper=max_leverage)
-    return (signal * scale).fillna(0.0)
+    target = (signal * scale).fillna(0.0).to_numpy()
+
+    out = np.empty(len(target))
+    current = 0.0
+    for t, tgt in enumerate(target):
+        if tgt == 0 or np.sign(tgt) != np.sign(current) or abs(tgt - current) > rebalance_band * abs(current):
+            current = tgt
+        out[t] = current
+    return pd.Series(out, index=signal.index)
 
 
 # --------------------------------------------------------------------------
