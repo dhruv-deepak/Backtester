@@ -1,113 +1,180 @@
 # Algorithmic Trading Backtester
 
-A from-scratch backtesting engine for evaluating systematic trading strategies,
-built to avoid the common correctness pitfalls (lookahead bias, ignoring
-transaction costs) that make naive backtests misleadingly optimistic.
+[![tests](https://github.com/dhruv-deepak/Backtester/actions/workflows/tests.yml/badge.svg)](https://github.com/dhruv-deepak/Backtester/actions/workflows/tests.yml)
 
+A from-scratch daily backtesting engine that is built to tell you **whether to
+believe its own results**.
 
-## What it does
+Most backtests lie in one of three ways: they use information the strategy
+couldn't have had (lookahead), they assume fills and costs that don't exist,
+or they report the best of many attempts as if it were the only one
+(selection bias). This project attacks all three:
 
-- Loads historical price data (via `yfinance`) or generates synthetic
-  Geometric Brownian Motion price series for offline testing
-- Implements three rule-based strategies: Moving Average Crossover,
-  Time-Series Momentum, and Bollinger-Band Mean Reversion
-- Implements an **ML-based strategy**: a Random Forest classifier trained
-  to predict next-day direction, retrained on a walk-forward expanding
-  window so it never sees future data at any prediction point
-- Runs each strategy through a backtest engine that:
-  - Shifts signals forward by one day to prevent lookahead bias
-  - Charges transaction costs (in basis points) on every position change
-  - Compounds returns into a realistic equity curve
-- Computes standard performance metrics: CAGR, annualized volatility,
-  Sharpe ratio, Sortino ratio, max drawdown, Calmar ratio, win rate
-- Reports the ML classifier's **out-of-sample accuracy against a
-  majority-class baseline** — the honest question isn't "does it make
-  money" but "does it actually predict better than guessing the more
-  common direction," and the code reports both explicitly
-- Outputs a comparison table across strategies plus a benchmark
-  (buy-and-hold), and plots equity curves
+| Failure mode | What this project does about it |
+|---|---|
+| **Lookahead bias** | Every strategy is **automatically audited** before it runs: its signal is recomputed on truncated histories and must not change. Canary tests prove the audit catches `shift(-1)`, full-sample normalisation and centered windows. |
+| **Unrealistic execution** | Decisions made at the close fill at the **next open**, so the overnight gap is not free money. Costs include commission, spread, volatility-scaled slippage, short-borrow fees and leverage financing. |
+| **Luck and selection bias** | Every Sharpe ratio comes with a **block-bootstrap confidence interval**, the **Probabilistic Sharpe Ratio**, and the **Deflated Sharpe Ratio**, which raises the bar based on how many variants you tried. Parameters are chosen by **walk-forward optimisation**, never on the data they're scored on. |
 
-## The ML strategy, specifically
+## Results on 20 years of SPY (2005–2024)
 
-`ml_signal.py` implements walk-forward classification:
+All numbers are net of costs with next-open fills.
 
-1. Features are engineered from price/volume only (lagged returns,
-   moving-average ratios, rolling volatility, RSI, volume ratio, Bollinger
-   z-score) — see `features.py`
-2. The model (Random Forest, intentionally shallow — `max_depth=5`,
-   `min_samples_leaf=20` — to resist overfitting on noisy financial data)
-   is retrained every `retrain_every` days on an **expanding window of only
-   past data**
-3. At each prediction point, the model has strictly never seen the row
-   it's predicting, or anything after it
-4. A confidence threshold (`prob_threshold`) means the strategy only takes
-   a position when the model's predicted probability is meaningfully off
-   0.5 — otherwise it stays flat rather than forcing a low-conviction trade
+```
+                  Sharpe  95% CI         PSR    DSR    Max DD   CAGR
+Buy & Hold         0.61   [ 0.22, 1.06]  1.00   0.94   -55.2%   10.3%
+MA Crossover       0.58   [ 0.15, 1.05]  0.99   0.91   -27.0%    6.4%
+Momentum           0.19   [-0.18, 0.57]  0.80   0.37   -44.9%    1.8%
+Mean Reversion     0.18   [-0.17, 0.58]  0.79   0.36   -36.4%    1.6%
+Donchian Breakout  0.01   [-0.37, 0.36]  0.52   0.13   -44.1%   -1.1%
+ML (logreg)        0.06   [-0.31, 0.48]  0.61   0.18   -60.4%   -0.4%
+```
 
-This design deliberately avoids the two most common mistakes in
-"ML for trading" student projects: shuffled train/test splits (which leak
-future information) and single static train-once models (which go stale
-as market regimes shift).
+What this says:
 
-## Why these design choices matter
+- **Only buy-and-hold and the MA crossover have Sharpe CIs that exclude zero.**
+  The other three rule-based strategies can't be told apart from no edge.
+- **The ML classifier has no skill.** Its out-of-sample accuracy is 53.9%, but
+  the up-day base rate is 54.9%: binomial p = 0.91, AUC = 0.49. Its P&L is noise.
+- **Walk-forward MA crossover** re-optimises its parameters every 6 months on
+  the prior 3 years only. Out of sample it earned **Sharpe 0.86 vs 0.61** for
+  buy & hold, with a **-21% max drawdown vs -52%**. Across the 24 parameter
+  combos, 100% had a positive Sharpe (a broad plateau, not a lucky spike) and
+  the best one survives deflation (DSR 0.997).
+- **But look at the chart.** Almost all of that edge comes from sidestepping
+  2008. After that, the strategy trails buy & hold. A single regime doing all
+  the work is precisely what the summary statistics hide.
 
-Backtesting is notoriously easy to get *wrong* in ways that look right:
+![Walk-forward out-of-sample equity, MA crossover vs buy & hold on SPY](docs/walkforward_spy_ma.png)
 
-- **Lookahead bias**: if you use today's closing price to decide today's
-  trade, you're cheating — you couldn't have known the close until the
-  market closed. This engine lags signals by one day before applying them.
-- **Ignoring costs**: a strategy that trades often can look great gross of
-  costs and lose money net of costs. This engine charges costs on every
-  position change, so turnover is penalized realistically.
-- **Sharpe vs. Sortino vs. Calmar**: Sharpe penalizes all volatility
-  (including upside surprises), Sortino only penalizes downside volatility,
-  and Calmar measures return relative to worst-case drawdown. Reporting
-  all three (rather than just Sharpe) gives a fuller risk picture.
+## Proving the tools work: null and positive controls
+
+A test that always says "no edge" is as useless as one that always says "edge".
+The synthetic data generator gives both controls:
+
+- `--trend 0` is a pure random walk. **Nothing is predictable by construction**,
+  so any edge a strategy shows is noise. Every strategy's CI includes zero, and
+  the ML gets p = 0.73. (The original version of this project reported a "+1.29pp
+  edge" for its classifier on a random walk, with no way to tell it was noise.)
+- `--trend 0.1` plants a slowly-wandering hidden drift. Momentum (Sharpe 1.12)
+  and breakout (1.02) **correctly** come out significant, and mean reversion
+  **correctly** comes out significantly *negative*, because fading a trend loses.
+
+The test suite checks that PSR is calibrated: under the null it exceeds 0.95
+about 5% of the time. It also checks that DSR rejects the best of 200
+noise strategies when plain PSR is fooled by it.
 
 ## Usage
 
 ```bash
 pip install -r requirements.txt
-
-# Rule-based strategies only, synthetic data (no internet needed)
-python main.py
-
-# Rule-based strategies on real historical data
-python main.py --ticker AAPL --start 2019-01-01 --end 2024-01-01
-python main.py --ticker RELIANCE.NS --start 2020-01-01 --end 2024-01-01
-
-# Include the ML classifier strategy (slower — retrains periodically)
-python main_ml.py --ticker AAPL --start 2018-01-01 --end 2024-01-01
-python main_ml.py  # synthetic data, no internet needed
-
-# ML strategy tuning knobs
-python main_ml.py --ticker AAPL --start 2018-01-01 --end 2024-01-01 \
-  --min_train_size 252 --retrain_every 20 --prob_threshold 0.55
 ```
+
+```bash
+python main.py compare
+```
+
+```bash
+python main.py compare --ticker SPY --start 2005-01-01 --end 2025-01-01 --ml
+```
+
+```bash
+python main.py optimize --strategy ma --ticker SPY --start 2005-01-01 --end 2025-01-01
+```
+
+```bash
+python -m pytest
+```
+
+Useful options (`python main.py compare -h` lists them all):
+
+| Option | Meaning |
+|---|---|
+| `--trend 0.1` | synthetic data with a planted edge (default `0` = random walk) |
+| `--csv prices.csv` | load your own OHLCV data |
+| `--execution close` | optimistic same-close fills, to see how much a result depends on them |
+| `--vol_target 0.15` | size positions to 15% annualised volatility (with a rebalance band) |
+| `--ml --model rf` | add the walk-forward ML classifier (`logreg`, `rf` or `gbm`) |
+| `--commission_bps`, `--spread_bps`, `--vol_slippage`, `--borrow_bps` | cost model |
+| `--strategy {ma,momentum,meanrev,breakout}` | which strategy to `optimize` |
+| `--train_days`, `--test_days`, `--anchored` | walk-forward windows |
+
+Charts are written to `output/` (equity/drawdown/rolling-Sharpe tearsheet,
+parameter heatmap, walk-forward equity). Yahoo downloads are cached in
+`data_cache/`.
+
+## How it works
+
+### Execution and costs (`engine.py`)
+A signal computed from day *t*'s close becomes a position at day *t+1*'s
+open. On that day the old position earns the overnight gap and the new one
+earns the open-to-close move. The original version of this project filled at
+the same close it used to decide, which is impossible in live trading. The
+`Sharpe @close fill` column shows how much each strategy depended on that.
+
+Per unit of position traded, you pay commission, half the spread, and slippage
+proportional to recent volatility. Per day, you pay borrow fees on shorts and
+financing on leverage above 1x. Round trips are extracted into a trade log, so
+win rate and profit factor are measured **per trade**, not per day.
+
+### Statistics (`stats.py`)
+- **PSR** (Bailey & López de Prado, 2012): the probability that the true Sharpe
+  is above zero, given the sample length, skewness and fat tails.
+- **DSR** (Bailey & López de Prado, 2014): PSR measured against the Sharpe the
+  *best of N worthless strategies* would show by luck. Try 24 parameter combos
+  and the bar rises to match.
+- **Circular block bootstrap** CIs. Resampling blocks rather than single days
+  preserves volatility clustering.
+
+### Lookahead audit (`validation.py`)
+A causal signal at row *t* must be identical whether it is computed on the full
+history or on data cut off at *t*. `check_no_lookahead()` tests this at several
+cut points and runs automatically before every `compare`. Use it on any new
+strategy you write.
+
+### Walk-forward optimisation (`optimize.py`)
+For each window: pick the parameters with the best Sharpe on the prior
+`train_days`, then trade them on the next `test_days`. The test windows are
+stitched together and run through the engine once, so the cost of switching
+parameters is charged. **Walk-forward efficiency** (OOS Sharpe / in-sample
+Sharpe) measures how much of the in-sample performance survives.
+
+### ML strategy (`ml.py`, `features.py`)
+Price/volume features (multi-horizon returns, MA distance, volatility regime,
+RSI, candle structure, overnight gap, volume). The model is retrained every 21
+days on an expanding (or `train_window` rolling) window of past rows whose
+labels were already known at that time. The final bar, whose outcome isn't known
+yet, is still predicted, because that's the one you'd trade. Skill is judged by
+a binomial test against the majority-class baseline and by AUC, not by P&L.
+A regularised logistic regression is the default; the random forest and
+gradient boosting have to beat it to justify their complexity.
 
 ## Project structure
 
 ```
 backtester/
-├── data.py        # price data loading (real + synthetic)
-├── strategies.py  # rule-based signal generators
-├── features.py     # feature engineering for the ML strategy
-├── ml_signal.py    # walk-forward ML classifier signal
-├── engine.py       # core backtest loop
-├── metrics.py      # performance metrics
-├── main.py         # orchestration + reporting (rule-based strategies)
-├── main_ml.py       # orchestration + reporting (includes ML classifier)
-└── requirements.txt
+├── data.py         # Yahoo (cached) / CSV / synthetic null & positive-control data
+├── strategies.py   # MA crossover, momentum, mean reversion, Donchian breakout, vol targeting
+├── engine.py       # fills, cost model, trade log
+├── metrics.py      # CAGR, Sharpe, Sortino, drawdown, trade stats
+├── stats.py        # PSR, DSR, block bootstrap
+├── validation.py   # automated lookahead audit
+├── optimize.py     # grid search, walk-forward optimisation
+├── features.py     # ML features
+├── ml.py           # walk-forward classifier + skill tests
+├── report.py       # tables and charts
+└── cli.py          # `compare` and `optimize` commands
+tests/              # 35 tests: engine arithmetic, metrics, statistics, lookahead canaries
+main.py             # entry point
 ```
 
-## Possible extensions
+## Limitations and next steps
 
-- Multi-asset portfolio backtesting with correlation-aware allocation
-- Slippage modeling in addition to transaction costs
-- Parameter sensitivity analysis (heatmaps of Sharpe across parameter grids)
-- Statistical significance testing on Sharpe ratio (is it distinguishable
-  from zero given the sample size?)
-- Feature importance analysis on the ML classifier — which features
-  actually drive predictions, and does that make economic sense?
-- Try simpler models (logistic regression) alongside the Random Forest as
-  a sanity check — added model complexity should earn its keep
+- Single asset, daily bars. Natural extension: a multi-asset portfolio with a
+  weights matrix and correlation-aware sizing.
+- The cost model is a parametric approximation. It has no order-book data and
+  no market impact that scales with trade size.
+- Yahoo data is survivorship-biased at the universe level: you only think to
+  test tickers that still exist.
+- DSR across *different* strategies (as in `compare`) treats them as trials of
+  one search. That's the conservative reading, but the trials aren't independent.
